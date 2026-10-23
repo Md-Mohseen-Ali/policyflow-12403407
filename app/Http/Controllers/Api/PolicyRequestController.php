@@ -160,6 +160,9 @@ class PolicyRequestController extends Controller
      *
      * SUCCESS: insurer issues and the response is received.
      * TIMEOUT_AFTER_ISSUE: insurer issues but the response is lost.
+     * DELAYED_CALLBACK: issuance occurs before the callback arrives.
+     * DUPLICATE_CALLBACK: issuance is pending callback delivery; replay the
+     * same callback to verify duplicate delivery is idempotent.
      */
     public function submit(Request $request, int $id): JsonResponse
     {
@@ -167,7 +170,7 @@ class PolicyRequestController extends Controller
             'scenario' => [
                 'sometimes',
                 'string',
-                Rule::in(['SUCCESS', 'TIMEOUT_AFTER_ISSUE']),
+                Rule::in(['SUCCESS', 'TEMPORARY_FAILURE', 'TIMEOUT_AFTER_ISSUE', 'DELAYED_CALLBACK', 'DUPLICATE_CALLBACK']),
             ],
         ]);
 
@@ -203,7 +206,7 @@ class PolicyRequestController extends Controller
                 ];
             }
 
-            if ($policy->status !== PolicyRequest::VALIDATED) {
+            if (!in_array($policy->status, [PolicyRequest::VALIDATED, PolicyRequest::FAILED], true)) {
                 return [
                     'error' => 'invalid_state',
                     'status' => $policy->status,
@@ -220,7 +223,9 @@ class PolicyRequestController extends Controller
                 'policy_request_id' => $policy->id,
                 'from_status' => $previousStatus,
                 'to_status' => PolicyRequest::SUBMITTED,
-                'reason' => 'Request submitted to mock insurer.',
+                'reason' => $previousStatus === PolicyRequest::FAILED
+                    ? 'Retry submitted to mock insurer after temporary failure.'
+                    : 'Request submitted to mock insurer.',
             ]);
 
             $attemptNumber = InsurerAttempt::where(
@@ -238,6 +243,37 @@ class PolicyRequestController extends Controller
 
             $providerReference = 'MOCK-' . $policy->id;
 
+            if ($scenario === 'TEMPORARY_FAILURE') {
+                $policy->update([
+                    'status' => PolicyRequest::FAILED,
+                    'failure_reason' => 'Temporary mock insurer failure; retry is allowed.',
+                ]);
+
+                $attempt->update([
+                    'outcome' => 'TEMPORARY_FAILURE',
+                    'provider_reference' => $providerReference,
+                    'error_message' => 'Simulated temporary insurer failure.',
+                    'finished_at' => now(),
+                ]);
+
+                PolicyStateHistory::create([
+                    'policy_request_id' => $policy->id,
+                    'from_status' => PolicyRequest::SUBMITTED,
+                    'to_status' => PolicyRequest::FAILED,
+                    'reason' => 'Mock insurer temporarily failed before issuing a policy.',
+                    'metadata' => [
+                        'provider_reference' => $providerReference,
+                        'scenario' => $scenario,
+                        'retryable' => true,
+                    ],
+                ]);
+
+                return [
+                    'temporary_failure' => true,
+                    'policy' => $policy->fresh(),
+                ];
+            }
+
             $policyNumber = 'POL-' . str_pad(
                 (string) $policy->id,
                 8,
@@ -254,19 +290,27 @@ class PolicyRequestController extends Controller
                 ]
             );
 
-            if ($scenario === 'TIMEOUT_AFTER_ISSUE') {
+            if (in_array($scenario, ['TIMEOUT_AFTER_ISSUE', 'DELAYED_CALLBACK', 'DUPLICATE_CALLBACK'], true)) {
                 $policy->update([
                     'status' => PolicyRequest::PENDING_CONFIRMATION,
                     'provider_reference' => $providerReference,
-                    'failure_reason' =>
-                        'Insurer response timed out; reconciliation required.',
+                    'failure_reason' => match ($scenario) {
+                        'DELAYED_CALLBACK' => 'Insurer issued the policy; callback is delayed.',
+                        'DUPLICATE_CALLBACK' => 'Insurer issued the policy; callback replay is expected.',
+                        default => 'Insurer response timed out; reconciliation required.',
+                    },
                 ]);
 
                 $attempt->update([
-                    'outcome' => 'TIMEOUT',
+                    'outcome' => in_array($scenario, ['DELAYED_CALLBACK', 'DUPLICATE_CALLBACK'], true)
+                        ? 'CALLBACK_PENDING'
+                        : 'TIMEOUT',
                     'provider_reference' => $providerReference,
-                    'error_message' =>
-                        'Simulated timeout after insurer issuance.',
+                    'error_message' => match ($scenario) {
+                        'DELAYED_CALLBACK' => 'Simulated delayed insurer callback.',
+                        'DUPLICATE_CALLBACK' => 'Simulated callback delivery may be duplicated.',
+                        default => 'Simulated timeout after insurer issuance.',
+                    },
                     'finished_at' => now(),
                 ]);
 
@@ -274,16 +318,22 @@ class PolicyRequestController extends Controller
                     'policy_request_id' => $policy->id,
                     'from_status' => PolicyRequest::SUBMITTED,
                     'to_status' => PolicyRequest::PENDING_CONFIRMATION,
-                    'reason' =>
-                        'Insurer may have issued the policy; response timed out.',
+                    'reason' => match ($scenario) {
+                        'DELAYED_CALLBACK' => 'Insurer issued the policy; callback has not arrived yet.',
+                        'DUPLICATE_CALLBACK' => 'Insurer issued the policy; duplicate callback delivery will be tested.',
+                        default => 'Insurer may have issued the policy; response timed out.',
+                    },
                     'metadata' => [
                         'provider_reference' => $providerReference,
                         'scenario' => $scenario,
+                        'callback_pending' => in_array($scenario, ['DELAYED_CALLBACK', 'DUPLICATE_CALLBACK'], true),
                     ],
                 ]);
 
                 return [
-                    'timed_out' => true,
+                    'timed_out' => $scenario === 'TIMEOUT_AFTER_ISSUE',
+                    'delayed_callback' => $scenario === 'DELAYED_CALLBACK',
+                    'duplicate_callback_scenario' => $scenario === 'DUPLICATE_CALLBACK',
                     'policy' => $policy->fresh(),
                 ];
             }
@@ -345,6 +395,32 @@ class PolicyRequestController extends Controller
                 'data' => $result['policy'],
                 'already_issued' => true,
             ], 200);
+        }
+
+        if (!empty($result['temporary_failure'])) {
+            return response()->json([
+                'message' => 'Mock insurer temporarily failed before issuance; retry is allowed.',
+                'data' => $result['policy'],
+                'retryable' => true,
+            ], 503);
+        }
+
+        if (!empty($result['delayed_callback'])) {
+            return response()->json([
+                'message' => 'Insurer issued the policy; waiting for its callback.',
+                'data' => $result['policy'],
+                'callback_pending' => true,
+                'reconciliation_required' => true,
+            ], 202);
+        }
+
+        if (!empty($result['duplicate_callback_scenario'])) {
+            return response()->json([
+                'message' => 'Insurer issuance is recorded; deliver the same callback twice to verify replay safety.',
+                'data' => $result['policy'],
+                'callback_pending' => true,
+                'duplicate_callback_scenario' => true,
+            ], 202);
         }
 
         if (!empty($result['timed_out'])) {
@@ -421,7 +497,7 @@ class PolicyRequestController extends Controller
             $attempt = InsurerAttempt::where(
                 'policy_request_id',
                 $policy->id
-            )->where('outcome', 'TIMEOUT')
+            )->whereIn('outcome', ['TIMEOUT', 'CALLBACK_PENDING'])
                 ->orderByDesc('attempt_number')
                 ->first();
 

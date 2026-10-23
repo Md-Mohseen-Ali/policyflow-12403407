@@ -163,4 +163,3 @@ class MockInsurerController extends Controller
         ], 200);
     }
 }
-

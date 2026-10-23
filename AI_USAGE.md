@@ -1,51 +1,36 @@
 # AI Usage Disclosure — PolicyFlow
 
-## 1. AI Tools Used
+## Tools used
 
-- **ChatGPT:** Used as a development assistant for project setup, implementation guidance, debugging, test development, and documentation.
-- **Docker:** Used to run the PHP application environment and PostgreSQL database.
-- **Laravel testing tools:** Used to execute automated tests and verify application behavior.
+- **ChatGPT:** Used as a coding and learning assistant while implementing the Laravel API, database-backed state tracking, mock-insurer scenarios, tests, and project documentation.
+- **Docker:** Used to run the PHP/Laravel application and PostgreSQL locally.
+- **Laravel automated tests:** Used to verify endpoint behavior and regression safety after implementation changes.
+- **Git:** Used to version the project and record implementation changes.
 
-## 2. Areas Where AI Assisted
+## Concrete assistance received
 
-ChatGPT assisted with:
+ChatGPT helped break the assignment into implementation steps, explain Laravel routing/controllers/models/migrations, plan the premium-calculation logic, and implement request validation and duplicate-intake idempotency. It also helped design state history and insurer-attempt records, mock-insurer behavior, timeout reconciliation, callback idempotency, and feature tests. Documentation for setup, endpoints, reliability decisions, and limitations was also drafted with assistance.
 
-- Setting up the Laravel application and Docker-based development environment.
-- Designing database migrations and Eloquent model relationships for policy requests, state histories, insurer attempts, and mock insurer records.
-- Implementing premium calculation using plan rates, inclusive trip duration, age multipliers, destination multipliers, and coverage multipliers.
-- Implementing policy intake, duplicate-request idempotency, policy submission, callback handling, and reconciliation.
-- Developing feature tests for validation, duplicate intake, successful issuance, and timeout reconciliation.
-- Debugging database-related test failures and preparing project documentation.
+## Incorrect or incomplete suggestion and correction
 
-## 3. Example of an Incorrect or Incomplete Suggestion
+An early version of the duplicate-intake exception handling checked only the PostgreSQL unique-violation SQLSTATE. The feature test suite used SQLite, so the duplicate-intake test exposed that this was not portable across database drivers. The handler was updated to recognize the relevant unique-constraint error signatures for PostgreSQL, SQLite, and MySQL, then the duplicate-intake test was rerun as part of the suite.
 
-An initial duplicate-request error handler checked only PostgreSQL's unique-constraint SQLSTATE (`23505`). During automated testing, the application used SQLite, and the duplicate-intake test failed because SQLite reported the constraint violation differently.
+This correction is documented to show that generated suggestions were tested against actual application behavior rather than accepted without verification.
 
-The handler was revised to recognize the relevant PostgreSQL and SQLite error codes, as well as MySQL's duplicate-key error code. The duplicate-intake test was then rerun to verify that the first request creates a policy request and the repeated request returns the existing record instead of creating another one.
+## Verification performed
 
-This demonstrated the importance of verifying AI-assisted code against the actual runtime and test environment.
+The following were run locally:
 
-## 4. Verification Performed
+- Database migrations completed successfully against the development PostgreSQL container.
+- Manual API checks covered policy intake, duplicate intake, successful issuance, request detail/history, filtering/pagination, timeout reconciliation, and duplicate-callback handling.
+- Automated test command:
 
-The following automated test suite passed:
+  ```powershell
+  docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan test
+  ```
 
-- Valid intake calculates the premium and produces the `VALIDATED` status.
-- Invalid trip dates are rejected.
-- Duplicate intake requests are handled idempotently.
-- Successful submission issues exactly one policy, and repeated submission does not issue another.
-- A timeout after insurer issuance can be reconciled without issuing another policy.
+- A prior full-suite run passed **10 tests and 55 assertions**. After that run, an explicit `DUPLICATE_CALLBACK` submit scenario and a test that replays the identical success callback were added. Rerun the test command after applying those final files and record the resulting test/ assertion count before submission. The suite covers valid intake and premium calculation, invalid trip dates, idempotent duplicate intake, single successful issuance, timeout reconciliation without re-issuance, retry after temporary insurer failure, delayed callback completion, duplicate callback replay, and protection for an already-issued policy.
 
-**Recorded test result:** 7 tests passed, with 31 assertions.
+## Limitations and remaining production considerations
 
-Manual API checks were also performed for policy intake, duplicate requests, successful submission, policy details, listing and pagination, duplicate callbacks, and timeout reconciliation.
-
-## 5. Human Review and Responsibility
-
-AI-generated suggestions were reviewed and tested during implementation. Code was adjusted when actual test results exposed issues. Database migrations, API responses, state transitions, and reconciliation behavior were checked through automated tests or manual API requests.
-
-The developer remains responsible for the final implementation, correctness, security, and any limitations in the submitted solution.
-
-## 6. Limitations
-
-The implemented mock-insurer scenarios and reliability behavior should be assessed against the actual code and test results. Automated tests do not establish production readiness, and additional failure-injection, concurrency, security, and integration testing would be appropriate before production deployment.
-
+The mock insurer is local and deterministic; it does not contact an external insurer. The assignment implementation does not include production callback signature verification, a queue/scheduled retry worker, load or concurrency testing, or deployment-grade secrets management. These should be addressed before treating the service as production-ready.

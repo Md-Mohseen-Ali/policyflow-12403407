@@ -1,235 +1,206 @@
+# PolicyFlow — Fault-Tolerant Insurance Issuance & Reconciliation Engine
 
-# PolicyFlow
-## Fault-Tolerant Insurance Issuance & Reconciliation Engine
+PolicyFlow is a REST API built with Laravel and PostgreSQL for receiving travel-insurance requests, calculating a premium, submitting requests to a deterministic mock insurer, recording state transitions and attempts, and reconciling uncertain issuance outcomes without issuing a duplicate policy.
 
-PolicyFlow is a REST API built with Laravel and PostgreSQL for receiving travel insurance requests, calculating premiums, issuing policies through a mock insurer, and reconciling uncertain insurer outcomes without issuing duplicate policies.
+## Features
 
-## 1. Technology Stack
+- Validated policy intake with inclusive trip-day calculation and a stored premium snapshot.
+- Database-enforced idempotency for `(agent_id, client_request_id)`.
+- Explicit request states and append-only state-history records.
+- Insurer attempt tracking, provider references, unique policy numbers, and a database-backed mock-insurer issuance registry.
+- Simulated `SUCCESS`, `TEMPORARY_FAILURE`, `TIMEOUT_AFTER_ISSUE`, `DELAYED_CALLBACK`, and `DUPLICATE_CALLBACK` scenarios.
+- Callback replay/duplicate handling through `POST /api/mock-insurer/callback`.
+- Reconciliation for cases where an insurer may have issued a policy but the application did not receive confirmation.
+- Status filtering and pagination.
+- Automated feature tests.
+
+## Technology
 
 - PHP 8.4
 - Laravel 13
 - PostgreSQL 16
 - Docker
-- PHPUnit / Laravel automated tests
+- PHPUnit / Laravel feature testing
 
-## 2. Architecture
+## Architecture
 
-The application uses a layered Laravel architecture:
+The HTTP API is handled by Laravel controllers. `PremiumCalculator` owns premium calculation. Eloquent models represent policy requests, status history, insurer attempts, and mock-insurer issuance records. Database transactions protect state transitions, and unique constraints provide a final safeguard against duplicate intake and policy issuance.
 
-- **Routes:** Define the REST API endpoints.
-- **Controllers:** Validate requests, coordinate business operations, and return HTTP responses.
-- **PremiumCalculator:** Calculates the premium using the configured plan rate and multipliers.
-- **Eloquent models:** Represent policy requests, insurer attempts, state history, and mock insurer issuance records.
-- **Database migrations:** Define the schema, relationships, indexes, and uniqueness constraints.
+## Run locally with Docker (PowerShell)
 
-### Main database tables
+These instructions assume Docker Desktop is running and the project files are in the current directory.
 
-- `policy_requests`: Stores the request, calculated premium snapshot, current status, provider reference, and policy number.
-- `policy_state_histories`: Records status transitions and associated reasons or metadata.
-- `insurer_attempts`: Records submission attempts and their outcomes.
-- `mock_insurer_issues`: Stores the mock insurer's authoritative issuance result.
+1. Install PHP dependencies into `vendor`:
 
-## 3. Prerequisites
+   ```powershell
+   docker run --rm -v "${PWD}:/app" -w /app composer:2 install
+   ```
 
-Install Docker Desktop and Git.
+2. Build the PHP image:
 
-The project runs PHP and PostgreSQL in Docker containers. Composer dependencies are included in the Laravel project.
+   ```powershell
+   docker build -t policyflow-php .
+   ```
 
-## 4. Local Setup
+3. Start PostgreSQL. Run this once to create the container:
 
-Start the PostgreSQL container if it is not already running:
+   ```powershell
+   docker run --name policyflow-db `
+     -e POSTGRES_DB=policyflow `
+     -e POSTGRES_USER=policyflow_user `
+     -e POSTGRES_PASSWORD=policyflow_dev_password `
+     -p 5433:5432 `
+     -d postgres:16
+   ```
 
-```powershell
-docker start policyflow-db
-```
+   If the container already exists but is stopped, use `docker start policyflow-db` instead of creating it again.
 
-From the project root, build the PHP image if necessary:
+4. Ensure `.env` exists (copy `.env.example` if necessary) and configure these database settings:
 
-```powershell
-docker build -t policyflow-php .
-```
+   ```dotenv
+   DB_CONNECTION=pgsql
+   DB_HOST=host.docker.internal
+   DB_PORT=5433
+   DB_DATABASE=policyflow
+   DB_USERNAME=policyflow_user
+   DB_PASSWORD=policyflow_dev_password
+   ```
 
-Configure the database values in `.env`:
+   These credentials are for local development only; use managed secrets for a deployed environment.
 
-```dotenv
-DB_CONNECTION=pgsql
-DB_HOST=host.docker.internal
-DB_PORT=5433
-DB_DATABASE=policyflow
-DB_USERNAME=policyflow_user
-DB_PASSWORD=policyflow_dev_password
-```
+5. Generate the application key and apply migrations:
 
-Run migrations:
+   ```powershell
+   docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan key:generate
+   docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan migrate
+   ```
 
-```powershell
-docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan migrate
-```
+6. Start the API server in a terminal and leave it running:
 
-Start the API server in a terminal:
+   ```powershell
+   docker run --rm -it -p 8000:8000 -v "${PWD}:/app" -w /app policyflow-php php artisan serve --host=0.0.0.0
+   ```
 
-```powershell
-docker run --rm -it -p 8000:8000 -v "${PWD}:/app" -w /app policyflow-php php artisan serve --host=0.0.0.0
-```
+   Base URL: `http://localhost:8000`
 
-The API is available at `http://localhost:8000`.
-
-> These database credentials are development credentials. Replace them with secure values before using the application outside a local assignment environment.
-
-## 5. API Endpoints
-
-All endpoints use JSON request and response bodies.
+## API endpoints
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| POST | `/api/policy-requests` | Create and validate a policy request |
-| GET | `/api/policy-requests/{id}` | Retrieve policy details, history, and attempts |
-| POST | `/api/policy-requests/{id}/submit` | Submit a validated request to the mock insurer |
-| POST | `/api/mock-insurer/callback` | Process an insurer callback |
-| POST | `/api/policy-requests/{id}/reconcile` | Reconcile an uncertain issuance result |
-| GET | `/api/policy-requests` | List requests with optional filtering and pagination |
+| `POST` | `/api/policy-requests` | Validate intake, calculate premium, persist the request |
+| `GET` | `/api/policy-requests/{id}` | Retrieve a request with state history and insurer attempts |
+| `POST` | `/api/policy-requests/{id}/submit` | Submit to the mock insurer using a selected scenario |
+| `POST` | `/api/mock-insurer/callback` | Process an insurer callback; repeated callbacks are safe |
+| `POST` | `/api/policy-requests/{id}/reconcile` | Verify an uncertain result against the mock-insurer registry |
+| `GET` | `/api/policy-requests?status=ISSUED&per_page=10&page=1` | List, filter, and paginate requests |
 
 ### Create a policy request
 
-Example request:
+```http
+POST /api/policy-requests
+Content-Type: application/json
 
-```json
 {
-  "client_request_id": "REQ-1001",
-  "agent_id": "AGENT-101",
-  "customer_name": "Test Customer",
-  "date_of_birth": "1998-04-10",
+  "client_request_id": "REQ-001",
+  "agent_id": "AGENT-001",
+  "customer_name": "Sample Customer",
+  "date_of_birth": "1998-04-12",
   "destination": "DOMESTIC",
-  "trip_start": "2026-12-01",
-  "trip_end": "2026-12-03",
+  "trip_start": "2027-01-10",
+  "trip_end": "2027-01-12",
   "plan_code": "BASIC",
   "sum_insured": 100000
 }
 ```
 
-Example command:
+A new request returns `201 Created`; a replay with the same `(agent_id, client_request_id)` returns `200 OK` and `idempotent_replay: true`. Invalid input returns `422 Unprocessable Entity`. Supported destinations are `DOMESTIC` and `INTERNATIONAL`; plans are `BASIC`, `PLUS`, and `PREMIUM`; coverage amounts are `100000`, `300000`, or `500000`.
 
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri "http://localhost:8000/api/policy-requests" `
-  -ContentType "application/json" `
-  -Body (Get-Content .\request.json -Raw)
+### Premium calculation
+
+The inclusive trip duration is `trip_end - trip_start + 1 day`.
+
+`Premium = daily plan rate × trip days × age multiplier × destination multiplier × coverage multiplier`
+
+| Factor | Value |
+|---|---|
+| Daily plan rates | BASIC ₹12; PLUS ₹20; PREMIUM ₹30 |
+| Age at trip start | 0–17: 1.10; 18–60: 1.00; 61–70: 1.50; 71+: 2.00 |
+| Destination | DOMESTIC: 1.00; INTERNATIONAL: 1.80 |
+| Sum insured | ₹100,000: 1.00; ₹300,000: 1.25; ₹500,000: 1.50 |
+
+The calculated amount and multipliers are stored with the request as a snapshot. For example, a 3-day domestic BASIC trip for a customer aged 28 with ₹100,000 coverage costs ₹36.00.
+
+### Submit scenarios
+
+Submit with a JSON body such as `{"scenario":"SUCCESS"}`. The default scenario is `SUCCESS`.
+
+| Scenario | Expected behavior |
+|---|---|
+| `SUCCESS` | Mock insurer issuance is confirmed; request becomes `ISSUED` and receives a unique policy number. |
+| `TEMPORARY_FAILURE` | Returns `503`; request becomes `FAILED` and is marked retryable. A later submission can retry. This simulated failure occurs before a policy is created in the mock-insurer registry. |
+| `TIMEOUT_AFTER_ISSUE` | Returns `202`; the mock insurer has issued a policy, but the application records `PENDING_CONFIRMATION`. Call reconciliation instead of resubmitting. |
+| `DELAYED_CALLBACK` | Returns `202` and records `PENDING_CONFIRMATION`; a later callback or reconciliation confirms the existing issuance. |
+| `DUPLICATE_CALLBACK` | Returns `202` with the issuance pending callback delivery. Send the same success callback twice: the first confirms issuance and the replay is acknowledged as a duplicate without changing the policy. |
+
+Example:
+
+```http
+POST /api/policy-requests/1/submit
+Content-Type: application/json
+
+{"scenario":"TIMEOUT_AFTER_ISSUE"}
 ```
 
-A new request returns HTTP `201`. Replaying the same `agent_id` and `client_request_id` returns HTTP `200` with `idempotent_replay: true`. Invalid input returns HTTP `422`.
+### Callback and duplicate-callback behavior
 
-### Submit a policy
+```http
+POST /api/mock-insurer/callback
+Content-Type: application/json
 
-```json
 {
-  "scenario": "SUCCESS"
+  "policy_request_id": 1,
+  "provider_reference": "MOCK-1",
+  "outcome": "SUCCESS",
+  "policy_number": "POL-00000001"
 }
 ```
 
-Send this body to `POST /api/policy-requests/{id}/submit`.
+Allowed callback outcomes are `SUCCESS` and `FAILED`. Re-delivering a callback after issuance returns `duplicate_callback: true` and does not change the issued policy. A provider-reference mismatch is rejected. To exercise the explicit `DUPLICATE_CALLBACK` scenario, submit using that scenario and then deliver the identical success callback twice. The first callback changes the request to `ISSUED`; the replay returns `duplicate_callback: true` and leaves the policy number unchanged.
 
-To simulate an insurer issuing a policy while the response is lost:
+### Reconcile an uncertain result
 
-```json
-{
-  "scenario": "TIMEOUT_AFTER_ISSUE"
-}
+```http
+POST /api/policy-requests/1/reconcile
 ```
 
-This scenario returns HTTP `202` and marks the request `PENDING_CONFIRMATION`. Reconcile it using:
+The reconciliation endpoint checks the mock-insurer issuance registry and, if issuance is confirmed, updates the request with the existing provider reference and policy number. It does not create a second issuance. If no insurer issuance result is available, the endpoint requests manual review rather than assuming success or failure.
 
-`POST /api/policy-requests/{id}/reconcile`
+## State model
 
-The application checks the mock insurer's issuance record instead of blindly submitting the request again.
+- `RECEIVED` → `VALIDATED` after intake validation and premium calculation.
+- `VALIDATED` → `SUBMITTED` when an issuance attempt begins.
+- `SUBMITTED` → `ISSUED` after synchronous success.
+- `SUBMITTED` → `FAILED` for the simulated temporary failure; failed requests can be retried.
+- `SUBMITTED` → `PENDING_CONFIRMATION` for timeout or delayed callback scenarios.
+- `PENDING_CONFIRMATION` → `ISSUED` after a confirming callback or reconciliation.
 
-### Retrieve and list policies
+Every transition is recorded in `policy_state_histories`. Attempts and their outcomes are tracked in `insurer_attempts`.
 
-Retrieve a policy:
+## Tests
 
-`GET /api/policy-requests/1`
-
-Filter by status and paginate:
-
-`GET /api/policy-requests?status=ISSUED&per_page=5&page=1`
-
-Supported statuses include `RECEIVED`, `VALIDATED`, `SUBMITTED`, `PENDING_CONFIRMATION`, `ISSUED`, `FAILED`, and `NEEDS_RECONCILIATION`.
-
-## 6. Premium Calculation
-
-The trip duration includes both the departure and return dates.
-
-| Plan | Base rate per day |
-|---|---:|
-| BASIC | ₹12 |
-| PLUS | ₹20 |
-| PREMIUM | ₹30 |
-
-Age multiplier at the start of the trip:
-
-| Age | Multiplier |
-|---|---:|
-| 0–17 | 1.10 |
-| 18–60 | 1.00 |
-| 61–70 | 1.50 |
-| 71+ | 2.00 |
-
-Destination multipliers:
-
-- DOMESTIC: 1.00
-- INTERNATIONAL: 1.80
-
-Coverage multipliers:
-
-- ₹100,000: 1.00
-- ₹300,000: 1.25
-- ₹500,000: 1.50
-
-Formula:
-
-`Premium = Base daily rate × Inclusive trip days × Age multiplier × Destination multiplier × Coverage multiplier`
-
-The calculator uses integer-cent arithmetic for its calculation and returns a two-decimal premium amount. The calculated amount and multipliers are stored with the request as a snapshot.
-
-## 7. Reliability and Consistency
-
-### Duplicate intake
-
-A database uniqueness constraint on `(agent_id, client_request_id)` prevents duplicate requests. Replayed requests return the existing record.
-
-### Duplicate issuance protection
-
-A policy can be submitted only from the `VALIDATED` state. Already-issued policies are returned without issuing again. A unique policy number and a unique mock insurer issuance record provide additional database safeguards.
-
-### Uncertain insurer outcomes
-
-A timeout after insurer issuance changes the request to `PENDING_CONFIRMATION`. Reconciliation checks the insurer's recorded result and updates the policy using that existing result.
-
-### Audit trail
-
-State history records transitions and reasons. Insurer attempts record the operation, outcome, provider reference, and timestamps.
-
-### Callbacks
-
-The mock insurer callback endpoint checks the provider reference and policy state. Duplicate callbacks for an already-issued policy do not overwrite its issued status.
-
-## 8. Running Tests
-
-Run the complete automated test suite:
+Run the test suite inside the PHP container:
 
 ```powershell
 docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan test
 ```
 
-The current test suite covers premium calculation, invalid trip dates, duplicate-intake idempotency, successful issuance, and timeout reconciliation.
+The suite covers premium calculation, input validation, idempotent intake, successful single issuance, timeout reconciliation, retry after temporary failure, delayed callback completion, duplicate success-callback replay, and protection against callbacks overwriting issued policies. Run the command above after applying the latest scenario update and use that run as the final verification result.
 
-## 9. Assumptions and Limitations
+## Reliability decisions and limitations
 
-- The insurer is simulated using local database records; no real insurance provider is integrated.
-- The current timeout scenario simulates a lost response after the mock insurer has recorded issuance.
-- This is an assignment implementation, not a production-ready insurance platform.
-- Authentication, authorization, secrets management, external-provider security, and operational monitoring require additional production hardening.
-- Real-world distributed execution would require further safeguards around network failures, concurrent requests, callback authentication, and reconciliation scheduling.
-
-## 10. Project Status
-
-The automated test suite currently passes seven tests with 31 assertions. Additional reliability scenarios and end-to-end behavior should be verified against the assignment's full acceptance criteria before submission.
+- Idempotency is enforced by a database unique constraint, not just a preliminary application check.
+- A pending/uncertain request cannot be resubmitted; reconciliation first checks the insurer's persisted result.
+- Unique constraints and `firstOrCreate` protect the mock-insurer issue registry, and issued policies are not overwritten by callbacks.
+- `lockForUpdate` is used around state transitions. Exact row-lock behavior depends on the production database; SQLite-based feature tests do not prove PostgreSQL concurrency behavior.
+- The insurer is a deterministic simulator, not a real insurer integration. External callback authentication/signature verification, production secrets management, scheduled retry workers/queues, and load/concurrency testing are outside this assignment implementation.
+- Temporary failures are retried by an explicit API request; there is no background retry scheduler.
