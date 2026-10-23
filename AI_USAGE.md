@@ -29,7 +29,7 @@ The following were run locally:
   docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan test
   ```
 
-- A prior full-suite run passed **10 tests and 55 assertions**. After that run, an explicit `DUPLICATE_CALLBACK` submit scenario and a test that replays the identical success callback were added. Rerun the test command after applying those final files and record the resulting test/ assertion count before submission. The suite covers valid intake and premium calculation, invalid trip dates, idempotent duplicate intake, single successful issuance, timeout reconciliation without re-issuance, retry after temporary insurer failure, delayed callback completion, duplicate callback replay, and protection for an already-issued policy.
+- The full Laravel test suite was run after the reliability scenarios were added; the last recorded run passed **11 tests and 67 assertions**. During the final assignment-checklist audit, an additional regression test was added for rejection of unsupported plan and coverage values because the assignment explicitly calls for unsupported-plan validation to be demonstrated in tests. Run the full test command above after applying the final audit update and ensure it passes before submission. The suite covers valid intake and premium calculation, invalid travel dates, unsupported plans and coverage, idempotent duplicate intake, single successful issuance, timeout reconciliation without re-issuance, retry after temporary insurer failure, delayed callback completion, duplicate callback replay, and protection for an already-issued policy.
 
 ## Limitations and remaining production considerations
 

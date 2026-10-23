@@ -31,6 +31,33 @@ class PolicyFlowScenarioTest extends TestCase
         return (int) $response->json('data.id');
     }
 
+    public function test_unsupported_plan_and_coverage_are_rejected(): void
+    {
+        $payload = [
+            'client_request_id' => 'SCENARIO-INVALID-PLAN',
+            'agent_id' => 'AGENT-SCENARIO-INVALID',
+            'customer_name' => 'Scenario Test Customer',
+            'date_of_birth' => '1998-04-12',
+            'destination' => 'DOMESTIC',
+            'trip_start' => '2027-01-10',
+            'trip_end' => '2027-01-12',
+            'plan_code' => 'UNSUPPORTED',
+            'sum_insured' => 100000,
+        ];
+
+        $this->postJson('/api/policy-requests', $payload)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('plan_code');
+
+        $payload['client_request_id'] = 'SCENARIO-INVALID-COVERAGE';
+        $payload['plan_code'] = 'BASIC';
+        $payload['sum_insured'] = 200000;
+
+        $this->postJson('/api/policy-requests', $payload)
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('sum_insured');
+    }
+
     public function test_temporary_failure_can_be_retried_without_duplicate_issuance(): void
     {
         $id = $this->createPolicy('SCENARIO-TEMP-001');

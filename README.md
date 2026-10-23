@@ -183,6 +183,7 @@ The reconciliation endpoint checks the mock-insurer issuance registry and, if is
 - `SUBMITTED` → `FAILED` for the simulated temporary failure; failed requests can be retried.
 - `SUBMITTED` → `PENDING_CONFIRMATION` for timeout or delayed callback scenarios.
 - `PENDING_CONFIRMATION` → `ISSUED` after a confirming callback or reconciliation.
+- `FAILED` → `SUBMITTED` when an explicit retry starts a new insurer attempt.
 
 Every transition is recorded in `policy_state_histories`. Attempts and their outcomes are tracked in `insurer_attempts`.
 
@@ -194,7 +195,7 @@ Run the test suite inside the PHP container:
 docker run --rm -v "${PWD}:/app" -w /app policyflow-php php artisan test
 ```
 
-The suite covers premium calculation, input validation, idempotent intake, successful single issuance, timeout reconciliation, retry after temporary failure, delayed callback completion, duplicate success-callback replay, and protection against callbacks overwriting issued policies. Run the command above after applying the latest scenario update and use that run as the final verification result.
+The suite covers premium calculation, invalid travel dates, unsupported plans and coverage values, idempotent intake, successful single issuance, timeout reconciliation, retry after temporary failure, delayed callback completion, duplicate success-callback replay, and protection against callbacks overwriting issued policies. Run the command above from the project root before submission and ensure the complete suite passes.
 
 ## Reliability decisions and limitations
 
